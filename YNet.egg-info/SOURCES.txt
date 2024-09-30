@@ -1,0 +1,11 @@
+README.md
+setup.py
+YNet.egg-info/PKG-INFO
+YNet.egg-info/SOURCES.txt
+YNet.egg-info/dependency_links.txt
+YNet.egg-info/requires.txt
+YNet.egg-info/top_level.txt
+ynet/Alzheimers.py
+ynet/__init__.py
+ynet/combination.py
+ynet/generate_data.py
