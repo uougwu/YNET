@@ -24,13 +24,642 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from generate_data import mono_tbi_injury,tri_tbi_ast,tri_tbi_injury,nams_generator,tri_tbi_tri,mono_generatory
 from tabulate import tabulate
 import pandas as pd
-from smooth_tiled_predictions import predict_img_with_smooth_windowing
+#from smooth_tiled_predictions import predict_img_with_smooth_windowing
 from scipy import ndimage
 from skimage.morphology import dilation, disk
 from generate_data import coculture_neu, coculture_na, coculture_nm, coculture_tri
 import matplotlib.pyplot as plt
 from generate_data import mono_generatory_mar_16
 import os
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+import napari
+from qtpy.QtWidgets import QApplication, QPushButton, QVBoxLayout, QWidget, QLineEdit, QLabel
+import sys
+from scipy.io import savemat
+
+def July_Alzer_ctrl(var,outpath):
+    
+    e = 'EX745_845'
+    f = 'index'
+
+    infected = h5py.File(var, 'a')
+    data = trans(np.array(infected.get(e)))
+    indices = [x * 4 for x in np.array(infected.get(f)).astype(int).tolist()[0]]
+    filenames = [f.replace('.mat', '') for f in os.listdir(outpath) if f.startswith('Control')]
+
+    print(filenames)
+    print(indices)
+
+    extracted_images = []
+    image_array = data.copy()
+    start_index = 0
+
+    for idx, index in enumerate(indices):
+        z = image_array[start_index:start_index + index, :, :]
+        extracted = np.stack([z[i:i + (index // 4), :, :] for i in range(0, z.shape[0], index // 4)], axis=-1)
+        image = minmax(extracted)
+        model = load_model('Z:/DeyPlay/mono_2024c_enameta_pretrained_neu_alzh_v5.hdf5', compile=False)
+        model_nbs = load_model('Z:/DeyPlay/mono_2024c_enameta_pretrained_neu_alzh_v4.hdf5', compile=False)
+        ypred = ((model_nbs.predict(image.clip(0.001, 0.15)) + 
+                  model.predict(image.clip(0.001, 0.3)))[:, :, :, 1] > 0.5).transpose(1, 2, 0) #0.5 default
+        para = filenames[idx]  
+        file_path = f'{outpath}/ResultsUpd_Intensity_1n2/Predict_{para}.mat'
+        savemat(file_path, {'cell_mask': ypred}, do_compression=True)
+        extracted_images.append(image)
+        start_index += index
+
+    return np.concatenate(extracted_images, axis=0)
+
+def generate_filenames(base_var, length, suffix):
+    base_name = base_var.split(suffix)[0]  
+    filenames = [f"{base_name}_s{str(i).zfill(2)}{suffix}" for i in range(length)]
+    return filenames
+
+def July_Alzer(var,outpath,Day):
+    
+    e = 'EX745_845'
+    f = 'index'
+
+    infected = h5py.File(var, 'a')
+    data = trans(np.array(infected.get(e)))
+    indices = [x * 4 for x in np.array(infected.get(f)).astype(int).tolist()[0]]
+
+    base_var = var.replace('.mat', '')
+    base_var = os.path.basename(base_var)
+    suffix = base_var.split(Day)[1]
+    suffix = f"_{suffix}" 
+
+    length = len(indices)
+    filenames = generate_filenames(base_var, length, suffix)
+
+    extracted_images = []
+    image_array = data.copy()
+    start_index = 0
+
+    for idx, index in enumerate(indices):
+        z = image_array[start_index:start_index + index, :, :]
+        extracted = np.stack([z[i:i + (index // 4), :, :] for i in range(0, z.shape[0], index // 4)], axis=-1)
+        image = minmax(extracted)
+        
+        model = load_model('Z:/DeyPlay/mono_2024c_enameta_pretrained_neu_alzh_v5.hdf5', compile=False)
+        model_nbs = load_model('Z:/DeyPlay/mono_2024c_enameta_pretrained_neu_alzh_v4.hdf5', compile=False)
+        
+        ypred = ((model_nbs.predict(image.clip(0.001, 0.15)) + 
+                  model.predict(image.clip(0.001, 0.1)))[:, :, :, 1] > 0.5).transpose(1, 2, 0)
+        
+        para = filenames[idx]  
+        file_path = f'{outpath}/Predict_{para}.mat'
+        savemat(file_path, {'cell_mask': ypred}, do_compression=True)
+        
+        extracted_images.append(image)
+        start_index += index
+
+    return np.concatenate(extracted_images, axis=0)
+
+
+def open_and_correct_images_silk(images, stack_of_masks, save_directory, default_filename):
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+
+    corrected_masks = list(stack_of_masks)
+    deleted_indices = []  
+    current_index = [0]  
+
+    def save_current_and_next():
+        corrected_masks[current_index[0]] = viewer.layers['Mask'].data
+        if current_index[0] < len(stack_of_masks) - 1:
+            current_index[0] += 1
+            while current_index[0] in deleted_indices and current_index[0] < len(stack_of_masks) - 1:
+                current_index[0] += 1
+            viewer.layers['Image'].data = images[current_index[0]]
+            viewer.layers['Mask'].data = stack_of_masks[current_index[0]]
+        else:
+            corrected_masks[current_index[0]] = viewer.layers['Mask'].data
+            retained_masks = [corrected_masks[i] for i in range(len(corrected_masks)) if i not in deleted_indices]
+            corrected_stack = np.stack(retained_masks, axis=0)
+            
+            custom_filename = filename_input.text() or default_filename
+            
+            save_path = os.path.join(save_directory, custom_filename)
+            ensure_dir_exists(os.path.dirname(save_path))
+            file_path = f'{save_path}.mat'
+            if corrected_stack.shape == (1,512,512):
+                savemat(file_path, {'cell_mask': to_categorical(corrected_stack[0,:,:],3)[:,:,1],'silk_mask': to_categorical(corrected_stack[0,:,:],3)[:,:,2]}, do_compression=True)
+            else:
+                savemat(file_path, {'cell_mask': trans(to_categorical(corrected_stack,3)[:,:,:,1].transpose(2,1,0)),'silk_mask': trans(to_categorical(corrected_stack,3)[:,:,:,2].transpose(2,1,0))}, do_compression=True)
+            print(f"Corrected masks saved to {save_path}")
+            viewer.close()
+
+    def go_back():
+        if current_index[0] > 0:
+            current_index[0] -= 1
+            while current_index[0] in deleted_indices and current_index[0] > 0:
+                current_index[0] -= 1
+            viewer.layers['Image'].data = images[current_index[0]]
+            viewer.layers['Mask'].data = stack_of_masks[current_index[0]]
+        else:
+            print("You are at the first image. Cannot go back further.")
+
+    def delete_current():
+        if current_index[0] not in deleted_indices:
+            deleted_indices.append(current_index[0])
+            print(f"Deleted image and mask at index {current_index[0]}")
+        save_current_and_next()  
+
+    viewer = napari.Viewer()
+
+    # Load the image and mask
+    viewer.add_image(images[0], name='Image')
+    viewer.add_labels(stack_of_masks[0], name='Mask')
+    
+    save_button = QPushButton('Save and Next')
+    save_button.clicked.connect(save_current_and_next)
+
+    back_button = QPushButton('Back')
+    back_button.clicked.connect(go_back)
+
+    delete_button = QPushButton('Delete')
+    delete_button.clicked.connect(delete_current)
+
+    filename_input = QLineEdit()
+    filename_input.setPlaceholderText("Enter custom filename (e.g., Control123_Day3_noTreat)")
+    filename_input.setText(default_filename)
+
+    save_widget = QWidget()
+    layout = QVBoxLayout()
+    layout.addWidget(QLabel("Custom Filename:"))
+    layout.addWidget(filename_input)
+    layout.addWidget(save_button)
+    layout.addWidget(back_button)
+    layout.addWidget(delete_button)
+    save_widget.setLayout(layout)
+    viewer.window.add_dock_widget(save_widget, area='right')
+
+    napari.run()
+
+def quality_assurance(var):
+    e = 'EX745_845'
+    g = 'cell_mask'
+    infected = h5py.File(var, 'a')
+    data = trans(np.array(infected.get(e)))
+    image = np.stack([data[i:i + (data.shape[0] // 4), :, :] for i in range(0, data.shape[0], data.shape[0] // 4)], axis=-1)
+    mask = np.array(infected.get(g))
+    if mask.shape==(512,512):
+        masks = mask
+    else:
+        masks = trans(mask)
+    return image,masks
+
+def quality_assurance_duo(var):
+    e = 'EX745_845'
+    infected = h5py.File(var, 'a')
+    data = trans(np.array(infected.get(e)))
+    extracted = np.stack([data[i:i + (data.shape[0] // 4), :, :] for i in range(0, data.shape[0], data.shape[0] // 4)], axis=-1)
+    image = minmax(extracted)
+    model = load_model('Z:/DeyPlay/mono_2024c_enameta_pretrained_neu_alzh_v5.hdf5', compile=False)
+    model_nbs = load_model('Z:/DeyPlay/mono_2024c_enameta_pretrained_neu_alzh_v4.hdf5', compile=False)
+    mask = ((model_nbs.predict(image.clip(0.0001, 0.15)) + 
+                model.predict(image.clip(0.0001, 0.1)))[:, :, :, 1] > 0.5)#transpose(2, 1, 0)
+    return image,mask
+
+
+def ensure_dir_exists(path):
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+def open_and_correct_images(images, stack_of_masks, save_directory, default_filename):
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+
+    corrected_masks = list(stack_of_masks)
+    deleted_indices = []  
+    current_index = [0]  
+
+    def save_current_and_next():
+        corrected_masks[current_index[0]] = viewer.layers['Mask'].data
+        if current_index[0] < len(stack_of_masks) - 1:
+            current_index[0] += 1
+            while current_index[0] in deleted_indices and current_index[0] < len(stack_of_masks) - 1:
+                current_index[0] += 1
+            viewer.layers['Image'].data = images[current_index[0]]
+            viewer.layers['Mask'].data = stack_of_masks[current_index[0]]
+        else:
+            corrected_masks[current_index[0]] = viewer.layers['Mask'].data
+            retained_masks = [corrected_masks[i] for i in range(len(corrected_masks)) if i not in deleted_indices]
+            corrected_stack = np.stack(retained_masks, axis=0)
+            
+            custom_filename = filename_input.text() or default_filename
+            
+            save_path = os.path.join(save_directory, custom_filename)
+            ensure_dir_exists(os.path.dirname(save_path))
+            file_path = f'{save_path}.mat'
+            if corrected_stack.shape == (1,512,512):
+                savemat(file_path, {'cell_mask': corrected_stack[0,:,:]}, do_compression=True)
+            else:
+                savemat(file_path, {'cell_mask': corrected_stack.transpose(2, 1, 0)}, do_compression=True)
+
+            print(corrected_stack.shape)
+            print(f"Corrected masks saved to {save_path}")
+            viewer.close()
+
+    def go_back():
+        if current_index[0] > 0:
+            current_index[0] -= 1
+            while current_index[0] in deleted_indices and current_index[0] > 0:
+                current_index[0] -= 1
+            viewer.layers['Image'].data = images[current_index[0]]
+            viewer.layers['Mask'].data = stack_of_masks[current_index[0]]
+        else:
+            print("You are at the first image. Cannot go back further.")
+
+    def delete_current():
+        if current_index[0] not in deleted_indices:
+            deleted_indices.append(current_index[0])
+            print(f"Deleted image and mask at index {current_index[0]}")
+        save_current_and_next()  
+
+    viewer = napari.Viewer()
+
+    # Load the image and mask
+    viewer.add_image(images[0], name='Image')
+    viewer.add_labels(stack_of_masks[0], name='Mask')
+    
+    save_button = QPushButton('Save and Next')
+    save_button.clicked.connect(save_current_and_next)
+
+    back_button = QPushButton('Back')
+    back_button.clicked.connect(go_back)
+
+    delete_button = QPushButton('Delete')
+    delete_button.clicked.connect(delete_current)
+
+    filename_input = QLineEdit()
+    filename_input.setPlaceholderText("Enter custom filename (e.g., Control123_Day3_noTreat)")
+    filename_input.setText(default_filename)
+
+    save_widget = QWidget()
+    layout = QVBoxLayout()
+    layout.addWidget(QLabel("Custom Filename:"))
+    layout.addWidget(filename_input)
+    layout.addWidget(save_button)
+    layout.addWidget(back_button)
+    layout.addWidget(delete_button)
+    save_widget.setLayout(layout)
+    viewer.window.add_dock_widget(save_widget, area='right')
+
+    napari.run()
+
+
+
+def trans(x):
+    y = np.zeros_like(x)
+    for i in range(x.shape[0]):
+        y[i,:,:] = x[i,:,:].T
+    return y
+
+def shapy(Xtrr):
+    return Xtrr.reshape(Xtrr.shape[0]*Xtrr.shape[1],Xtrr.shape[2],Xtrr.shape[3],Xtrr.shape[4])
+
+def patchete(A,patch_size,channel):
+    G = []
+    for i in range(A.shape[0]):  
+        for j in range(A.shape[1]):
+            patches = patchify(A[i,j,:,:,:],(patch_size,patch_size,channel),step=patch_size)
+            G.append(np.reshape(patches,(patches.shape[0]*patches.shape[1],patches.shape[3],patches.shape[4],patches.shape[5])))
+    return np.concatenate(G,axis=0)
+
+# def unpatchete(A):
+#     groups = []
+#     num_groups = A.shape[0] // 12
+#     for i in range(num_groups):  
+#         groupy = A[i*12:(i + 1)*12,:,:,:]
+#         G = np.reshape(groupy,(3,4,256,256,A.shape[3]))
+#         group = []
+#         for j in range(3): 
+#             patches = unpatchify(np.reshape(G[j,:,:,:,:],(2,2,1,256,256,A.shape[3])),(512, 512, A.shape[3]))
+#             group.append(patches)
+#         groups.append(np.stack(group,axis=0))
+#     return shapy(np.stack(groups,axis=0))
+
+
+
+def plot_base_tri(Xtes, y,y_pred, nu, var, custom_name):
+    maska = np.sum(Xtes.clip(0.0001, 0.1), axis=3)
+    button_next = widgets.Button(description="Next")
+    button_back = widgets.Button(description="Back")
+    button_delete = widgets.Button(description="Delete")
+    button_save = widgets.Button(description="Save")
+    output = widgets.Output()
+    display(widgets.VBox([widgets.HBox([button_back, button_next, button_delete, button_save])]), output)
+    
+    deleted_indices = []  
+
+    def update_plot(i):
+        with output:
+            clear_output(wait=True)
+            
+            fig, axes = plt.subplots(1, 3, figsize=(34, 8))
+            fig.suptitle(var, fontsize=20)
+
+            ax = axes[0]
+            im = ax.imshow(maska[i, :, :])
+            ax.set_title("Sum of Optical Section", fontsize=15)
+            ax.axis("on")
+            ax.grid(True)
+
+            ax = axes[1]
+            im = ax.imshow(y[i, :, :])
+            ax.set_title("Ground Truth", fontsize=15)
+            ax.axis("on")
+            ax.grid(True)
+
+            ax = axes[2]
+            ax.imshow(y_pred[i, :, :] > nu)
+            ax.set_title(f"Predicted Predicted Neurons_{i}", fontsize=15)
+            ax.axis("on")
+            ax.grid(True)
+
+            plt.show()
+
+    def on_button_next_click(b):
+        on_button_next_click.i += 1
+        if on_button_next_click.i >= Xtes.shape[0]:
+            on_button_next_click.i = Xtes.shape[0] - 1
+        while on_button_next_click.i in deleted_indices and on_button_next_click.i < Xtes.shape[0] - 1:
+            on_button_next_click.i += 1
+        update_plot(on_button_next_click.i)
+
+    def on_button_back_click(b):
+        on_button_next_click.i -= 1
+        if on_button_next_click.i < 0:
+            on_button_next_click.i = 0
+        while on_button_next_click.i in deleted_indices and on_button_next_click.i > 0:
+            on_button_next_click.i -= 1
+        update_plot(on_button_next_click.i)
+
+    def on_button_delete_click(b):
+        if on_button_next_click.i not in deleted_indices:
+            deleted_indices.append(on_button_next_click.i)
+            print(f"Deleted image {on_button_next_click.i}")
+        on_button_next_click(b)  
+
+    def on_button_save_click(b):
+        retained_indices = [i for i in range(Xtes.shape[0]) if i not in deleted_indices]
+        Xtes_retained = Xtes[retained_indices]
+        print(Xtes_retained.shape)
+        with h5py.File(f'Z:/DeyPlay/train_alzh/{custom_name}_images.h5', 'w') as hf:
+            hf.create_dataset('images', data=Xtes_retained, compression='gzip')
+        
+    
+    on_button_next_click.i = 0  
+    
+    button_next.on_click(on_button_next_click)
+    button_back.on_click(on_button_back_click)
+    button_delete.on_click(on_button_delete_click)
+    button_save.on_click(on_button_save_click)
+    
+    update_plot(0)
+
+
+def plot_base_duo(Xtes, y, nu, var, custom_name):
+    maska = np.sum(Xtes.clip(0.0001, 0.1), axis=3)
+    button_next = widgets.Button(description="Next")
+    button_back = widgets.Button(description="Back")
+    button_delete = widgets.Button(description="Delete")
+    button_save = widgets.Button(description="Save")
+    output = widgets.Output()
+    display(widgets.VBox([widgets.HBox([button_back, button_next, button_delete, button_save])]), output)
+    
+    deleted_indices = []  
+
+    def update_plot(i):
+        with output:
+            clear_output(wait=True)
+            
+            fig, axes = plt.subplots(1, 2, figsize=(34, 8))
+            fig.suptitle(var, fontsize=20)
+
+            ax = axes[0]
+            im = ax.imshow(maska[i, :, :])
+            ax.set_title("Sum of Optical Section", fontsize=15)
+            ax.axis("on")
+            ax.grid(True)
+
+            ax = axes[1]
+            ax.imshow(y[i, :, :] > nu)
+            ax.set_title(f"Predicted Predicted Neurons (OS_{i})", fontsize=15)
+            ax.axis("on")
+            ax.grid(True)
+
+            plt.show()
+
+    def on_button_next_click(b):
+        on_button_next_click.i += 1
+        if on_button_next_click.i >= Xtes.shape[0]:
+            on_button_next_click.i = Xtes.shape[0] - 1
+        while on_button_next_click.i in deleted_indices and on_button_next_click.i < Xtes.shape[0] - 1:
+            on_button_next_click.i += 1
+        update_plot(on_button_next_click.i)
+
+    def on_button_back_click(b):
+        on_button_next_click.i -= 1
+        if on_button_next_click.i < 0:
+            on_button_next_click.i = 0
+        while on_button_next_click.i in deleted_indices and on_button_next_click.i > 0:
+            on_button_next_click.i -= 1
+        update_plot(on_button_next_click.i)
+
+    def on_button_delete_click(b):
+        if on_button_next_click.i not in deleted_indices:
+            deleted_indices.append(on_button_next_click.i)
+            print(f"Deleted image {on_button_next_click.i}")
+        on_button_next_click(b)  
+
+    def on_button_save_click(b):
+        retained_indices = [i for i in range(Xtes.shape[0]) if i not in deleted_indices]
+        Xtes_retained = Xtes[retained_indices]
+        print(Xtes_retained.shape)
+        with h5py.File(f'Z:/DeyPlay/train_alzh/{custom_name}_images.h5', 'w') as hf:
+            hf.create_dataset('images', data=Xtes_retained, compression='gzip')
+        
+    
+    on_button_next_click.i = 0  
+    
+    button_next.on_click(on_button_next_click)
+    button_back.on_click(on_button_back_click)
+    button_delete.on_click(on_button_delete_click)
+    button_save.on_click(on_button_save_click)
+    
+    update_plot(0)
+
+
+
+def ensure_dir_exists(path):
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+def open_and_correct_image(stack_of_masks, save_directory, default_filename):
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+
+    corrected_masks = list(stack_of_masks)
+    deleted_indices = []  
+    current_index = [0]  
+
+    def save_current_and_next():
+        corrected_masks[current_index[0]] = viewer.layers['Binary Image'].data
+        if current_index[0] < len(stack_of_masks) - 1:
+            current_index[0] += 1
+            while current_index[0] in deleted_indices and current_index[0] < len(stack_of_masks) - 1:
+                current_index[0] += 1
+            viewer.layers['Binary Image'].data = stack_of_masks[current_index[0]]
+        else:
+            corrected_masks[current_index[0]] = viewer.layers['Binary Image'].data
+            retained_masks = [corrected_masks[i] for i in range(len(corrected_masks)) if i not in deleted_indices]
+            corrected_stack = np.stack(retained_masks, axis=0)
+            
+            custom_filename = filename_input.text() or default_filename
+            
+            save_path = os.path.join(save_directory, custom_filename)
+            ensure_dir_exists(os.path.dirname(save_path))
+            #np.save(save_path, corrected_stack)
+            file_path = f'{save_path}.mat'
+            savemat(file_path, {'cell_mask': corrected_stack.transpose(2,1,0)}, do_compression=True)
+        
+            print(f"Corrected masks saved to {save_path}")
+            viewer.close()
+
+    def go_back():
+        if current_index[0] > 0:
+            current_index[0] -= 1
+            while current_index[0] in deleted_indices and current_index[0] > 0:
+                current_index[0] -= 1
+            viewer.layers['Binary Image'].data = stack_of_masks[current_index[0]]
+        else:
+            print("You are at the first image. Cannot go back further.")
+
+    def delete_current():
+        if current_index[0] not in deleted_indices:
+            deleted_indices.append(current_index[0])
+            print(f"Deleted image and mask at index {current_index[0]}")
+        save_current_and_next()  
+
+    viewer = napari.Viewer()
+    viewer.add_labels(stack_of_masks[0], name='Binary Image')
+    
+    save_button = QPushButton('Save and Next')
+    save_button.clicked.connect(save_current_and_next)
+
+    back_button = QPushButton('Back')
+    back_button.clicked.connect(go_back)
+
+    delete_button = QPushButton('Delete')
+    delete_button.clicked.connect(delete_current)
+
+    filename_input = QLineEdit()
+    filename_input.setPlaceholderText("Enter custom filename (e.g., Control123_Day3_noTreat.npy)")
+    filename_input.setText(default_filename)
+
+    save_widget = QWidget()
+    layout = QVBoxLayout()
+    layout.addWidget(QLabel("Custom Filename:"))
+    layout.addWidget(filename_input)
+    layout.addWidget(save_button)
+    layout.addWidget(back_button)
+    layout.addWidget(delete_button)
+    save_widget.setLayout(layout)
+    viewer.window.add_dock_widget(save_widget, area='right')
+
+    napari.run()
+
+
+def process_matfiles(var):
+    e = 'EX745_845' 
+    f  = 'index'
+    
+    infected = h5py.File(var,'a')   
+    data = trans(np.array(infected.get(e)))
+    
+    indices = [x*4 for x in np.array(infected.get(f)).astype(int).tolist()[0]]
+    extracted_images = []
+    extracted_imagery = []
+    image_array = data.copy()
+    start_index = 0
+    
+    for index in indices:
+        z = image_array[start_index:start_index+index, :, :]
+        extracted = np.stack([z[i:i+(index//4), :, :] for i in range(0, z.shape[0], index//4)], axis=-1)
+        normalized_img = minmax(extracted)
+        extracted_imagery.append(normalized_img)
+        extracted_images.append(patchete(np.expand_dims(normalized_img,axis=0),256,4))
+        start_index += index
+    original_shape = np.concatenate(extracted_imagery,axis=0).shape
+    return np.concatenate(extracted_images,axis=0),original_shape
+
+
+
+# def minmax(A):
+#     return (A - A.min()) / (A.max() - A.min())
+
+
+def unpatchete(patches, original_shape, patch_size):
+    n, x, y, z = original_shape
+    reconstructed_array = np.zeros(original_shape)
+    patches_per_dim_0 = x // patch_size  
+    patches_per_dim_1 = y // patch_size  
+
+    patch_idx = 0
+    for i in range(n):
+        current_patches = patches[patch_idx:patch_idx + patches_per_dim_0 * patches_per_dim_1]
+        patch_idx += patches_per_dim_0 * patches_per_dim_1
+        reshaped_patches = current_patches.reshape(patches_per_dim_0, patches_per_dim_1, 1, patch_size, patch_size, z)
+        reconstructed_array[i] = unpatchify(reshaped_patches, (x, y, z))
+    return reconstructed_array
+
+
+
+def make_initial_masks(image, image_shape, patch_size,reconstructed_image):
+    model_base_tri = load_model('Z:/DeyPlay/triculture_2020b_v0_neu.hdf5',compile=False) 
+    model_base_mono = load_model('Z:/DeyPlay/mono_2020b_enameta_mar16_pretrained_v2.hdf5',compile=False)  
+
+    y_pred_train_mono = model_base_mono.predict(image.clip(0.001,0.3)) + model_base_mono.predict(image.clip(0.001,0.1)) 
+    masky_silk_mono = y_pred_train_mono[:,:,:,3]>0.01
+    y_pred_silk_mono = np.array([remove_small_objects(masky_silk_mono[i], min_size=1000) for i in range(masky_silk_mono.shape[0])])
+    y_pred_train_mono[:,:,:,3] = y_pred_silk_mono
+
+    y_pred_train_tri = model_base_tri.predict(reconstructed_image) + model_base_tri.predict(reconstructed_image.clip(0.001,0.1)) 
+    masky_silk_tri = y_pred_train_tri[:,:,:,3]>0.01
+    y_pred_silk_tri = np.array([remove_small_objects(masky_silk_tri[i], min_size=50) for i in range(masky_silk_tri.shape[0])])
+    y_pred_train_tri[:,:,:,3] = y_pred_silk_tri
+
+    ypred_neu = (y_pred_train_tri[:,:,:,2]>0.1) + (unpatchete(y_pred_train_mono,image_shape, patch_size)[:,:,:,2]>0.1)
+    ypred_neu[ypred_neu==2]=1
+    y_pred_train_tri[:,:,:,2] = ypred_neu
+
+    ypred_silk = (y_pred_train_tri[:,:,:,3]>0.003) + (unpatchete(y_pred_train_mono,image_shape, patch_size)[:,:,:,3]>0.003)
+    ypred_silk[ypred_silk==3]=1
+    y_pred_train_tri[:,:,:,3] = np.array([remove_small_objects(ypred_silk[i], min_size=450) for i in range(ypred_silk.shape[0])])
+
+    return (1 - (y_pred_train_tri[:, :, :, 3] > 0.01)) * (y_pred_train_tri[:, :, :, 2] > 0.1)
+
+
+def loading_train_val_test_data(var):
+    if var == 'train':
+        train_folder = 'Z:/DeyPlay/train_alzh'
+        X, y = load_images_and_masks(train_folder)
+    elif var == 'val':
+        validation_folder = 'Z:/DeyPlay/validation_alzh'
+        X, y = load_images_and_masks(validation_folder)
+
+    elif var == 'test':
+        test_folder = 'Z:/DeyPlay/test_alzh'
+        X, y = load_images_and_masks(test_folder)
+
+    return X,y
 
 def load_images_and_masks(folder_path):
     image_list = []
@@ -58,24 +687,24 @@ def load_images_and_masks(folder_path):
   
     return np.concatenate(images_array,axis=0), to_categorical(np.expand_dims(np.concatenate(masks_array,axis=0),axis=3),2)
 
-def July_Alzer(n_classes):
-    e = 'EX755_860' 
-    f  = 'index'
+# def July_Alzer(n_classes):
+#     e = 'EX755_860' 
+#     f  = 'index'
     
-    infected = h5py.File('Alhz.mat','a')   
-    data = trans(np.array(infected.get(e)))
+#     infected = h5py.File('Alhz.mat','a')   
+#     data = trans(np.array(infected.get(e)))
     
-    indices = [x*4 for x in np.array(infected.get(f)).astype(int).tolist()[0]]
-    extracted_images = []
-    image_array = data.copy()
-    start_index = 0
-    for index in indices:
-        z = image_array[start_index:start_index+index, :, :]
-        extracted = np.stack([z[i:i+(index//4), :, :] for i in range(0, z.shape[0], index//4)], axis=-1)
-        extracted_images.append(minmax(extracted))
-        start_index += index
+#     indices = [x*4 for x in np.array(infected.get(f)).astype(int).tolist()[0]]
+#     extracted_images = []
+#     image_array = data.copy()
+#     start_index = 0
+#     for index in indices:
+#         z = image_array[start_index:start_index+index, :, :]
+#         extracted = np.stack([z[i:i+(index//4), :, :] for i in range(0, z.shape[0], index//4)], axis=-1)
+#         extracted_images.append(minmax(extracted))
+#         start_index += index
          
-    return extracted_images
+#     return extracted_images
 
 def clean_silk(y,min_size,classy):
     label_objects, _ = measure.label(y[:,:,:,classy], return_num=True, connectivity=1)
@@ -478,60 +1107,60 @@ def unmasky_makery(annony):
     return shapery(np.stack(M,axis=0),3)
 
 
-def plot_base_tri(Xtes,ytes,y_pred,nu,s,g,var):
-    maska = np.sum(Xtes,axis=3)
-    for i in range(Xtes.shape[0]):
-        fig, axes = plt.subplots(1, 7, figsize=(30, 4.5))
-        fig.suptitle(var, fontsize=20)
+# def plot_base_tri(Xtes,ytes,y_pred,nu,s,g,var):
+#     maska = np.sum(Xtes,axis=3)
+#     for i in range(Xtes.shape[0]):
+#         fig, axes = plt.subplots(1, 7, figsize=(30, 4.5))
+#         fig.suptitle(var, fontsize=20)
         
-        ax = axes[0]
-        im = ax.imshow(maska[i, :, :])
-        ax.set_title("Aggregated Image",fontsize=15)
-        ax.axis("on")
-        ax.grid(True)
+#         ax = axes[0]
+#         im = ax.imshow(maska[i, :, :])
+#         ax.set_title("Aggregated Image",fontsize=15)
+#         ax.axis("on")
+#         ax.grid(True)
         
-        # divider = make_axes_locatable(ax)
-        # cax = divider.append_axes("right", size="5%", pad=0.05)
-        # cbar = plt.colorbar(im, cax=cax)
-        #cbar.set_label('Intensity')
+#         # divider = make_axes_locatable(ax)
+#         # cax = divider.append_axes("right", size="5%", pad=0.05)
+#         # cbar = plt.colorbar(im, cax=cax)
+#         #cbar.set_label('Intensity')
         
-        ax = axes[1]
-        ax.imshow(ytes[i,:,:,2])
-        ax.set_title("True Neuronal Mask",fontsize=15)
-        ax.axis("on")
-        ax.grid(True)
+#         ax = axes[1]
+#         ax.imshow(ytes[i,:,:,2])
+#         ax.set_title("True Neuronal Mask",fontsize=15)
+#         ax.axis("on")
+#         ax.grid(True)
 
-        ax = axes[2]
-        ax.imshow(ytes[i,:,:,4])
-        ax.set_title("True Silk Mask",fontsize=15)
-        ax.axis("on")
-        ax.grid(True)
+#         ax = axes[2]
+#         ax.imshow(ytes[i,:,:,4])
+#         ax.set_title("True Silk Mask",fontsize=15)
+#         ax.axis("on")
+#         ax.grid(True)
 
-        ax = axes[3]
-        ax.imshow(ytes[i,:,:,3])
-        ax.set_title("True Glial Mask",fontsize=15)
-        ax.axis("on")
-        ax.grid(True)
+#         ax = axes[3]
+#         ax.imshow(ytes[i,:,:,3])
+#         ax.set_title("True Glial Mask",fontsize=15)
+#         ax.axis("on")
+#         ax.grid(True)
           
-        ax = axes[4]
-        ax.imshow(y_pred[i,:,:,2]>nu)
-        ax.set_title("Predicted Neuronal Mask",fontsize=15)
-        ax.axis("on")
-        ax.grid(True)
+#         ax = axes[4]
+#         ax.imshow(y_pred[i,:,:,2]>nu)
+#         ax.set_title("Predicted Neuronal Mask",fontsize=15)
+#         ax.axis("on")
+#         ax.grid(True)
         
-        ax = axes[5]
-        ax.imshow(y_pred[i,:,:,4]>s)
-        ax.set_title("Predicted Silk Mask",fontsize=15)
-        ax.axis("on")
-        ax.grid(True)
+#         ax = axes[5]
+#         ax.imshow(y_pred[i,:,:,4]>s)
+#         ax.set_title("Predicted Silk Mask",fontsize=15)
+#         ax.axis("on")
+#         ax.grid(True)
 
-        ax = axes[6]
-        ax.imshow(y_pred[i,:,:,3]>g)
-        ax.set_title("Predicted Glial Mask",fontsize=15)
-        ax.axis("on")
-        ax.grid(True)
+#         ax = axes[6]
+#         ax.imshow(y_pred[i,:,:,3]>g)
+#         ax.set_title("Predicted Glial Mask",fontsize=15)
+#         ax.axis("on")
+#         ax.grid(True)
         
-        plt.show()
+#         plt.show()
 
 def plot_base_tris(Xtes,ytes,y_pred,nu,g,var):
     maska = np.sum(Xtes,axis=3)
@@ -2439,18 +3068,18 @@ def matchetest(A,patch_size):
         G.append(np.reshape(patches,(patches.shape[0]*patches.shape[1],patches.shape[2],patches.shape[3])))
     return np.concatenate(G,axis=0)
 
-def unpatchete(A):
-    groups = []
-    num_groups = A.shape[0] // 12
-    for i in range(num_groups):  
-        groupy = A[i*12:(i + 1)*12,:,:,:]
-        G = np.reshape(groupy,(3,4,256,256,A.shape[3]))
-        group = []
-        for j in range(3): 
-            patches = unpatchify(np.reshape(G[j,:,:,:,:],(2,2,1,256,256,A.shape[3])),(512, 512, A.shape[3]))
-            group.append(patches)
-        groups.append(np.stack(group,axis=0))
-    return shapy(np.stack(groups,axis=0))
+# def unpatchete(A):
+#     groups = []
+#     num_groups = A.shape[0] // 12
+#     for i in range(num_groups):  
+#         groupy = A[i*12:(i + 1)*12,:,:,:]
+#         G = np.reshape(groupy,(3,4,256,256,A.shape[3]))
+#         group = []
+#         for j in range(3): 
+#             patches = unpatchify(np.reshape(G[j,:,:,:,:],(2,2,1,256,256,A.shape[3])),(512, 512, A.shape[3]))
+#             group.append(patches)
+#         groups.append(np.stack(group,axis=0))
+#     return shapy(np.stack(groups,axis=0))
 
 def unpatchetey(A,patchsize):
     groups = []
