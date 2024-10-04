@@ -261,7 +261,6 @@ def open_and_correct_images(images, stack_of_masks, save_directory, default_file
             else:
                 savemat(file_path, {'cell_mask': corrected_stack.transpose(2, 1, 0)}, do_compression=True)
 
-            print(corrected_stack.shape)
             print(f"Corrected masks saved to {save_path}")
             viewer.close()
 
@@ -481,7 +480,6 @@ def plot_base_duo(Xtes, y, nu, var, custom_name):
     def on_button_save_click(b):
         retained_indices = [i for i in range(Xtes.shape[0]) if i not in deleted_indices]
         Xtes_retained = Xtes[retained_indices]
-        print(Xtes_retained.shape)
         with h5py.File(f'Z:/DeyPlay/train_alzh/{custom_name}_images.h5', 'w') as hf:
             hf.create_dataset('images', data=Xtes_retained, compression='gzip')
         
