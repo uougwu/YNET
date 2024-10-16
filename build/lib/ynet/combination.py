@@ -144,11 +144,12 @@ def open_and_correct_images_silk(images, stack_of_masks, save_directory, default
             
             save_path = os.path.join(save_directory, custom_filename)
             ensure_dir_exists(os.path.dirname(save_path))
+            #print(to_categorical(corrected_stack,3)[:,:,:,1].transpose(2,1,0).shape)
             file_path = f'{save_path}.mat'
             if corrected_stack.shape == (1,512,512):
                 savemat(file_path, {'cell_mask': to_categorical(corrected_stack[0,:,:],3)[:,:,1],'silk_mask': to_categorical(corrected_stack[0,:,:],3)[:,:,2]}, do_compression=True)
             else:
-                savemat(file_path, {'cell_mask': trans(to_categorical(corrected_stack,3)[:,:,:,1].transpose(2,1,0)),'silk_mask': trans(to_categorical(corrected_stack,3)[:,:,:,2].transpose(2,1,0))}, do_compression=True)
+                savemat(file_path, {'cell_mask': trans(to_categorical(corrected_stack,3)[:,:,:,1]).transpose(2,1,0),'silk_mask': trans(to_categorical(corrected_stack,3)[:,:,:,2]).transpose(2,1,0)}, do_compression=True)
             print(f"Corrected masks saved to {save_path}")
             viewer.close()
 
@@ -259,7 +260,7 @@ def open_and_correct_images(images, stack_of_masks, save_directory, default_file
             if corrected_stack.shape == (1,512,512):
                 savemat(file_path, {'cell_mask': corrected_stack[0,:,:]}, do_compression=True)
             else:
-                savemat(file_path, {'cell_mask': corrected_stack.transpose(2, 1, 0)}, do_compression=True)
+                savemat(file_path, {'cell_mask': trans(corrected_stack).transpose(2, 1, 0)}, do_compression=True)
 
             print(f"Corrected masks saved to {save_path}")
             viewer.close()
